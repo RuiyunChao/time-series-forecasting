@@ -1,0 +1,384 @@
+---
+title: "STAT 443 project, Winter 2024"
+author: "Group 10"
+date: "2024-03-26"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(astsa)
+weather <- read.csv("Data_Group10.csv",header=TRUE)
+```
+
+## Split data into training and testing
+
+```{r}
+Dec_end = which(weather$DateTime == "2023-12-31 18:00:00")
+Oct_start = which(weather$DateTime == "2023-10-01 00:00:00")
+
+indx = which(weather$DateTime == "2023-11-30 18:00:00")
+train_data <- na.omit(weather$Temperature[1:indx])
+validation_data <- na.omit(weather$Temperature[-(1:indx)])
+
+plot(train_data, type = "l", xlab = "6 hours", ylab = "temperation", xlim = c(Oct_start, Dec_end))
+lines((indx + 1):length(weather$Temperature), validation_data, col = "blue")
+abline(v=length(train_data), lty=2)
+
+legend("topright", legend = c("training data", "testing data"), lty = 1,
+       col = c("black", "blue"))
+```
+```{r}
+temperature.ts = ts(na.omit(weather$Temperature), frequency = 4)
+plot(decompose(temperature.ts))
+```
+
+```{r}
+acf(train_data)
+acf(diff(train_data))
+```
+
+
+\newpage
+
+# Regression
+
+## Unregularized regression
+```{r}
+time = c(1:823, 828:indx)
+time.new = (indx + 1):length(weather$Temperature)
+
+day = as.factor(c(rep(1:4, 333)))
+day.new = as.factor(c(rep(1:4, 31)))
+mse_reg = rep(0, 10)
+mse_reg.withseasonal = rep(0,10)
+
+X = poly(1:length(weather$Temperature), 10)
+
+for (i in 1:10) {
+  mod_reg1 = lm(train_data ~ X[time, 1:i])
+  pred_reg1 = cbind(1, X[time.new, 1:i]) %*% coef(mod_reg1)
+  mse_reg[i] = mean((pred_reg1 - validation_data)^2)
+  
+  mod_reg2 = lm(train_data ~ X[time, 1:i] + day)
+  pred_reg2 = model.matrix(~X[time.new, 1:i] + day.new) %*% coef(mod_reg2)
+  mse_reg.withseasonal[i] = mean((pred_reg2 - validation_data)^2)
+}
+
+cbind(mse_reg, mse_reg.withseasonal)
+```
+degree 2 is the best one, and we should include seasonal component
+
+```{r}
+p.best = which.min(mse_reg.withseasonal)
+p.best
+```
+
+```{r}
+mod_reg = lm(train_data ~ X[time, 1:p.best] + day)
+
+# Diagnostic plots for final regression model
+par(mfrow = c(2,2))
+plot(mod_reg$fitted, mod_reg$residuals, pch=16)
+abline(h = 0, lty = 2, col = "red")
+
+qqnorm(mod_reg$residuals)
+qqline(mod_reg$residuals)
+
+plot(mod_reg$residuals, pch = 16)
+abline(h=0, lty=2, col="red")
+
+acf(mod_reg$residuals)
+```
+```{r}
+time = 1:length(na.omit(weather$Temperature))
+day = as.factor(c(rep(1:4, 364)))
+final.reg = lm(na.omit(weather$Temperature) ~ poly(time, p.best) + day)
+
+# prediction for next two weeks
+day.new = as.factor(c(rep(1:4, 7)))
+time.new = length(na.omit(weather$Temperature)) + (1:28)
+
+predict_reg = predict(final.reg, data.frame(time = time.new, day = day.new),
+                      interval = "prediction")
+predict_reg
+```
+```{r}
+plot(na.omit(weather$Temperature), type = "l", xlim=c(Oct_start, 1480), ylim = c(-20, 33))
+abline(v = length(na.omit(weather$Temperature)), col = "black", lty = 2)
+lines(time.new, predict_reg[, 1], col = "red", lwd=1)
+lines(time.new, predict_reg[, 2], col = "blue", lwd=1)
+lines(time.new, predict_reg[, 3], col = "blue", lwd=1)
+abline(v = length(na.omit(weather$Temperature)), col = "black", lty = 2)
+legend("bottomleft", legend = c("observed", "confidence interval", "prediction"), lty = 1,
+       col = c("black", "blue", "red"))
+```
+
+\newpage
+
+## Regularized regression
+```{r}
+library(glmnet)
+library(caret)
+
+log_lambda_seq <- seq(-7, 3, by = 0.1)
+lambda_seq <- c(0, exp(log_lambda_seq))
+alphas <- c(0, 0.5, 1)
+ps=1:15
+X = poly(1:1332,15)
+cvopt = c()
+lambopt= c()
+
+for (a in alphas){
+  for (p in ps){
+    xtrain=X[-indx,1:p]
+    if (p == 1) {
+      xtrain <- cbind(xtrain,0) 
+    }
+    set.seed(20837467)
+    CV=cv.glmnet(xtrain,train_data,alpha=a)
+    lambopt[p]= CV$lambda.1se
+    cvopt[p] = CV$cvm[which(round(CV$lambda,10) == round(CV$lambda.1se,10))]
+  }
+  
+  par(mfrow=c(1,2))
+  plot(ps,lambopt,type = "b",pch=19,xlab = "p",ylab=expression(lambda[p]),main= paste("alpha=",a))
+  plot(ps,cvopt,type="b",pch=19,xlab="p",ylab = "CV error",main= paste("alpha=",a))
+  minmin=which.min(cvopt)
+  abline(v=minmin,col="pink",lty=3)
+  print(minmin)
+}
+
+
+# Plots for Regularized Regression 
+par(mfrow=c(1,3))
+#alpha = 0
+optimal_p <- 14
+xtrain_full = X[-indx, 1:optimal_p]
+ytrain_full = train_data
+
+if (optimal_p == 1) {
+  xtrain_full <- cbind(xtrain_full, 0) 
+}
+set.seed(20837467)
+final_model <- glmnet(xtrain_full, ytrain_full, alpha = 0, lambda = lambopt[optimal_p])
+predictions <- predict(final_model, X[, 1:optimal_p])
+plot(train_data ~ seq_along(train_data), main = paste("Alpha =", 0),
+     xlab = "Index", ylab = "Quality", pch = 19,col="pink")
+lines(predictions, col="black")
+
+#alpha=0.5 
+optimal_p <- 15
+xtrain_full = X[-indx, 1:optimal_p]
+ytrain_full = train_data
+
+if (optimal_p == 1) {
+  xtrain_full <- cbind(xtrain_full, 0) 
+}
+
+set.seed(20837467)
+final_model <- glmnet(xtrain_full, ytrain_full, alpha = 0.5, lambda = lambopt[optimal_p])
+predictions <- predict(final_model, X[, 1:optimal_p])
+plot(train_data ~ seq_along(train_data), main = paste("Alpha =", 0.5),
+     xlab = "Index", ylab = "Quality", pch = 19,col="pink")
+lines(predictions, col="black")
+
+#alpha = 1  
+optimal_p <- 5
+xtrain_full = X[-indx, 1:optimal_p]
+ytrain_full = train_data
+
+if (optimal_p == 1) {
+  xtrain_full <- cbind(xtrain_full, 0) 
+}
+set.seed(20837467)
+final_model <- glmnet(xtrain_full, ytrain_full, alpha = 1, lambda = lambopt[optimal_p])
+predictions <- predict(final_model, X[, 1:optimal_p])
+plot(train_data ~ seq_along(train_data), main = paste("Alpha =", 1),
+     xlab = "Index", ylab = "Quality", pch = 19,col="pink")
+lines(predictions, col="black")
+
+
+#APSE for Rugularized 
+#alpha = 0
+optimal_p <- 14
+xtrain_full = X[-indx, 1:optimal_p]
+ytrain_full = train_data
+
+if (optimal_p == 1) {
+  xtrain_full <- cbind(xtrain_full, 0) 
+}
+set.seed(20837467)
+final_model <- glmnet(xtrain_full, ytrain_full, alpha = 0, lambda = lambopt[optimal_p],family = "gaussian")
+predictions <- predict(final_model, X[-indx, 1:optimal_p])
+apse_0 = suppressWarnings(mean((validation_data-predictions)^2))
+apse_0
+
+#alpha = 0.5
+optimal_p <- 15
+xtrain_full = X[-indx, 1:optimal_p]
+ytrain_full = train_data
+
+if (optimal_p == 1) {
+  xtrain_full <- cbind(xtrain_full, 0) 
+}
+set.seed(20837467)
+final_model <- glmnet(xtrain_full, ytrain_full, alpha = 0.5, lambda = lambopt[optimal_p],family = "gaussian")
+predictions <- predict(final_model, X[-indx, 1:optimal_p])
+apse_0.5 = suppressWarnings(mean((validation_data-predictions)^2))
+apse_0.5
+
+#alpha = 1
+optimal_p <- 5
+xtrain_full = X[-indx, 1:optimal_p]
+ytrain_full = train_data
+
+if (optimal_p == 1) {
+  xtrain_full <- cbind(xtrain_full, 0) 
+}
+set.seed(20837467)
+final_model <- suppressWarnings(glmnet(xtrain_full, ytrain_full, alpha = 1, lambda = lambopt[optimal_p],family = "gaussian"))
+predictions <- predict(final_model, X[-indx, 1:optimal_p])
+apse_1 = suppressWarnings(mean((validation_data-predictions)^2))
+apse_1
+
+```
+
+
+\newpage
+
+## Smoothing
+```{r}
+train_data.ts = ts(train_data, start = 1, frequency = 4)
+
+# simple exponential smoothing
+es <- HoltWinters(train_data.ts, gamma = FALSE, beta = FALSE)
+HW.predict = predict(es, n.ahead = 124)
+mse1 = mean((validation_data - HW.predict)^2)
+mse1
+```
+```{r}
+# double exponential smoothing
+hw <- HoltWinters(train_data.ts, gamma = FALSE)
+HW.predict = predict(hw, n.ahead = 124)
+mse2 = mean((validation_data - HW.predict)^2)
+mse2
+```
+```{r}
+# Holt Winters method - Additive
+hw.additive <- HoltWinters(train_data.ts, seasonal = "additive") 
+HW.predict = predict(hw.additive, n.ahead = 124)
+mse3 = mean((validation_data - HW.predict)^2)
+mse3
+```
+```{r}
+# Holt Winters method - Multiplicative
+hw_multiplicative <- suppressWarnings(HoltWinters(train_data.ts, seasonal = "multiplicative"))
+HW_predict <- predict(hw_multiplicative, n.ahead = 124)
+mse4 <- mean((validation_data - HW_predict)^2)
+mse4
+```
+
+```{r}
+hw.final <- HoltWinters(ts(na.omit(weather$Temperature), frequency = 4), gamma = FALSE)
+plot(hw.final, predict(hw.final, n.ahead = 28, prediction.interval = TRUE),
+                       xlim = c(330, 373))
+```
+\newpage
+
+# Box-Jenkins
+
+```{r}
+#par(mfrow = c(1,2))
+plot(train_data, type = "l")
+acf(train_data)
+```
+
+
+```{r}
+#par(mfrow = c(1,2))
+diff_train_data = diff(train_data, lag = 4)
+plot(diff_train_data, type = "l")
+acf(diff_train_data)
+```
+
+
+```{r}
+#par(mfrow = c(1,2))
+acf(diff_train_data)
+pacf(diff_train_data)
+```
+
+
+```{r}
+train_data.ts = ts(na.omit(train_data), freq = 4)
+model1 = sarima(train_data.ts, p = 2, d = 0, q = 1, P = 1, D = 1, Q = 1, S = 4)
+model2 =  sarima(train_data.ts, p =3, d = 0, q = 1, P = 1, D = 1, Q = 1, S = 4)
+model3 =  sarima(train_data.ts, p = 2, d = 0, q = 1, P = 1, D = 1, Q = 2, S = 4)
+model4 =  sarima(train_data.ts, p = 3, d = 0, q = 1, P = 1, D = 1, Q = 2, S = 4)
+```
+
+
+```{r}
+rbind(model1 = model1$ICs,
+      model2 = model2$ICs,
+      model3 = model3$ICs,
+      model4 = model4$ICs)
+```
+
+
+```{r}
+train.ts = ts(na.omit(train_data.ts), frequency = 4)
+pred_mod1 = sarima.for(train.ts, n.ahead = 124, p = 2, d = 0, q = 1, P = 1, D = 1, Q = 1, S = 4)
+plot(train.ts, xlim = c(300, 370), ylim = c(-10, 25))
+test = ts(validation_data, frequency = 4)
+time.pred = c(seq(334, 364, by = 1/4), 364.25, 364.5, 364.75)
+lines(time.pred, test, col = "blue")
+lines(pred_mod1$pred, col = "red")
+legend("topright", legend = c("train data", "validation data", "forecasting"),
+       col = c("black", "blue", "red"), lty = 1)
+```
+## Forecasting on validation(testing) data
+
+```{r}
+pred_mod1 = sarima.for(train_data.ts, n.ahead = 124, p =2, d = 0, q = 1, P = 1, D = 1, Q = 1, S = 4)
+pred_mod2 = sarima.for(train_data.ts, n.ahead = 124, p =3, d = 0, q = 1, P = 1, D = 1, Q = 1, S = 4)
+pred_mod3 = sarima.for(train_data.ts, n.ahead = 124, p =2, d = 0, q = 1, P = 1, D = 1, Q = 2, S = 4)
+pred_mod4 = sarima.for(train_data.ts, n.ahead = 124, p =3, d = 0, q = 1, P = 1, D = 1, Q = 2, S = 4)
+```
+
+```{r}
+apse_1 = mean((validation_data-pred_mod1$pred)^2)
+apse_2 = mean((validation_data-pred_mod2$pred)^2)
+apse_3 = mean((validation_data-pred_mod3$pred)^2)
+apse_4 = mean((validation_data-pred_mod4$pred)^2)
+
+rbind(model1 = apse_1,
+      model2 = apse_2,
+      model3 = apse_3,
+      model4 = apse_4)
+```
+
+## forecasting on future data
+
+```{r}
+data.ts = ts(na.omit(weather$Temperature))
+pred_mod1 = sarima.for(data.ts, n.ahead = 28, p =2, d = 0, q = 1, P = 1, D = 1, Q = 1, S = 4)
+```
+```{r}
+pred_mod1$pred
+```
+
+# Conclusion
+
+```{r}
+tab_compare <- matrix(c(min(mse_reg.withseasonal), mse2,apse_1))
+row.names(tab_compare) <- c('regression', 'double exponential smoothing', 'box-jenkins')
+colnames(tab_compare) <- c('APSE')
+tab_compare
+```
+
+
